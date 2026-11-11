@@ -12,6 +12,7 @@ does not establish compatibility between products, transports or revisions.
 | `ascent-vrx.c` | Regular Ascent VRX, SDIO DEV; matched v0.2.0 bench profile |
 | `ascent-lite.c` | Upstream Lite profile, SDIO AP |
 | `ascent-lite-plus.c` | Upstream Lite Plus profile, SDIO AP |
+| `betafpv-p1-goggle.c` | BETAFPV P1 goggles, SDIO DEV; fpvOS RAM-boot reception and live-video tested |
 | `betafpv-p1-air.c` | BETAFPV P1 Air Unit, stock 1.0.44, SDIO AP; profile only, transport integration pending |
 | `ascent-vrx-pro.c` | Upstream VRX Pro profile, USB DEV |
 | `steadyview-vrx.c` | Upstream SteadyView receiver profile |
@@ -109,3 +110,63 @@ them. Current-source compilation with this profile is an offline check, not a
 reproduction of the working fpvOS P1 build. Its host integration and hardware
 validation need to be assessed separately when porting the remaining changes.
 No P1 loader is provided by this repository.
+
+## BETAFPV P1 goggles
+
+`betafpv-p1-goggle.c` is a separate receiver profile recovered from the goggles'
+stock `bb_demo_gnd_d.img`. The host reports SDK `1.0.36.rel`, built 2025-11-10;
+this identifies the inspected source, not a confirmed retail firmware version.
+It contains 704 register-default records, 20 pin records, 25 FCH keys and
+I/O-domain mask 2. No executable vendor code, loader JSON or unit-specific
+calibration is included.
+
+Provenance (SHA-256):
+
+- Stock container, 281,600 bytes:
+  `fe587c0730cd33b8eb811b177a6c3f7c87a093b54c0758e9220727f95ef9f348`.
+- Runtime segment, file offset `0x4600`, 263,232 bytes:
+  `7331b6ce4f0cf08da80dff91e39f96cedba41e43bd24863207977bcb63344e37`.
+- Defaults, 5,632 bytes:
+  `540b2ebc026106d7bd6b629fea0936fcb75719ec24d53034b34011890884497c`.
+- Pins, 80 bytes:
+  `10fc3fd643d18b758828602637c2c61b5a998ed7a2e69e1c8769e5406fa0391d`.
+- FCH keys, 100 bytes:
+  `a4054a19a2d4d5cd21b788d0a39b55f046ac72ddcf831167f9b6563b0c3af75c`.
+
+The defaults were recovered by bounded interpretation of stock instructions
+at `0x20bc98` up to `0x20cf72`, with `gp=0x244440`, `a0=1`, `a1=1`
+(DEV) and configuration word `0x242758=0x200`. This captures the initial
+704 writes, not the later mode-dependent register updates. These defaults
+differ at 27 records from Ascent VRX and 26 from P1 Air. The resulting profile has passed fpvOS SDIO startup and live reception on
+the goggles; individual register effects have not been exhaustively verified.
+
+Pin functions come from the early initializer at `0x208678`, resolved through
+the function table at `0x242cd0`: A0–A4, B0/B3/B4, C4/C2/C5 and D4–D12.
+C4 selects function 38, unlike P1 Air's function 73; the air unit's D0–D2
+records are absent. The stock domain calls set GPIO bit 1 and clear bit 2.
+FCH keys are at runtime address `0x238638` and match the existing profiles.
+The profile uses shared SFDP discovery with no unverified JEDEC fallback table.
+
+Offline build:
+
+```sh
+./open8030 image --profile profiles/betafpv-p1-goggle.c \
+  --cflags='-DAR_PINS_BEFORE_FACTORY -DAR_FACTORY_OPTIONAL' \
+  --output .local/open8030-p1-goggle.img \
+  --build-dir .local/build-p1-goggle
+```
+
+No `AR_ROLE_AP` flag is used for this DEV baseline. The inspected stock base
+JSON says AP; it must not be used unchanged with this build. A host integration
+must supply compatible receiver configuration and merge the goggles' factory
+power calibration and user/channel settings, as stock startup does.
+`AR_FACTORY_OPTIONAL` permits host-supplied calibration when radio-local factory
+storage is unavailable; it does not provide that calibration itself.
+
+The fpvOS RAM-boot integration adds `AR_EXPLICIT_IO_DOMAINS` through its
+package patch, selects SDIO and supplies host-merged factory calibration.
+It passed startup, association to a P1 Air, ten control acknowledgements and
+3.07 MB of reception in 20 seconds; Kestrel then decoded live video. This
+validates that integrated build, not the standalone offline command above.
+Radio loss counters were nonzero; range, all RF modes, persistent pairing
+and operation without inherited stock initialization remain unqualified.
