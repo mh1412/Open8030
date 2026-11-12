@@ -46,8 +46,12 @@ loader JSON is supplied separately by the host at runtime.
 
 ## Provenance and comparison
 
-The regular `ascent-vrx.c` profile preserves the data used in the October 22,
-2026 v0.2.0 dual-radio bench test; only its source comments changed for publication.
+The regular `ascent-vrx.c` profile uses the register defaults, FCH keys and
+flash table from the October 22, 2026 v0.2.0 dual-radio bench test. Its pin table
+now includes all 29 stock boot records, including the previously omitted C/D
+banks that control the RF front end and select their I/O domains. The pin mux
+values were checked against the regular VRX 18.21.10 boot routine at
+`0x20513a` and function table at `0x2675e0`.
 Current firmware includes subsequent upstream changes and has not inherited that
 hardware-validation result simply by using this profile.
 
@@ -56,7 +60,7 @@ hardware-validation result simply by using this profile.
 - Original generated VRX profile SHA-256:
   `1bc673f086b67f2a742233619d655d92aca6816932a57e2b674cbdbd4f6f12c5`.
 
-The regular VRX profile has 10 pin records and 19 flash-part records. Its register
+The regular VRX profile has 29 pin records and 19 flash-part records. Its register
 defaults differ from upstream `board-profile.c`, which has one flash-part record.
 
 For Lite VTX, use gehee’s `ascent-lite.c` unchanged. Our earlier bench profile
