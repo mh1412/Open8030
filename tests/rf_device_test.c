@@ -1,5 +1,6 @@
 /* SPDX-License-Identifier: MIT */
 /* Synthetic peripheral behavior: real RF acceptance still requires hardware. */
+#include "ar_pwr_auto.h"
 #include "ar_rf_device.h"
 #include "ar_mac.h"
 #include <assert.h>
@@ -516,6 +517,18 @@ static void open8030_linked_tests(void)
 		assert(engine_resets == resets);
 		ticks = a + frame; irq(5);
 		assert(engine_resets > resets && ((*reg(0x0a1109e0) >> 8) & 7) == 2);
+	}
+	/* The AP's TX power announcement (command 9; command 8 sub-type 13 from
+	 * an AP built in between): never a frame mode. 26 dBm is 0x1ad, whose
+	 * (byte >> 4) & 7 a ground that took it as command 8's frame mode read
+	 * as mode 2. */
+	{
+		const uint32_t mode = ar_rf_frame_information()->frame_mode;
+		const uint8_t power[4] = {0xad, 0x01, 0, 0};
+		ap_command(AR_PHY_PWR_ANNOUNCE, 5, power, 4); irq(5); irq(5);
+		assert(ar_rf_frame_information()->frame_mode == mode);
+		ap_command(8, 5, power, 4); irq(5); irq(5);
+		assert(ar_rf_frame_information()->frame_mode == mode);
 	}
 	/* The AP's resend maps (command 11): 12 frames, two bits each, newest
 	 * first, placed on our frames (the newest: the frame that ended at our

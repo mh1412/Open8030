@@ -1490,6 +1490,14 @@ static void sync_apply(void)
 	if (receive_operation >= 72 && (control[1] & 15) == 3) { sync_tx_mcs(control); return; }
 	if (receive_operation >= 72 && (control[1] & 15) == 5) { sync_bandwidth(control); return; }
 	if (receive_operation >= 72 && (control[1] & 15) == 4) { sync_channel(control); return; }
+	if (receive_operation >= 72 && (control[1] & 15) == AR_PHY_PWR_ANNOUNCE) {
+		/* The AP's TX power (ar_pwr_auto.h); anything else on it is left. */
+		uint8_t dbm;
+		uint32_t word = control[3] | (uint32_t)control[4] << 8 | (uint32_t)control[5] << 16 | (uint32_t)control[6] << 24;
+		if (!ar_pwr_auto_parse_announce(word, &dbm)) { dev_peer_power(dbm); }
+		else { sync_info.unsupported++; }
+		return;
+	}
 	if (receive_operation >= 72 && (control[1] & 15) == 8) {
 		/* The sync message: sub-type 0 the frame mode; others (6, a power
 		 * request from an AP, which this DEV does not take) are no frame. */
@@ -3782,7 +3790,7 @@ static void ap_poll(void)
 	if (ap_pwr_announce && ap_link.state == AR_AP_CONNECTED && power_level[8] != 0xff) {
 		uint32_t word = ar_pwr_auto_announce_word(power_level[8]);
 		const uint8_t bytes[4] = {(uint8_t)word, (uint8_t)(word >> 8), 0, 0};
-		if (!ar_phy_control_enqueue(&phy_control, 8, 5, bytes, 4, &phy_ops, NULL)) { ap_pwr_announce = 0; ap_info.phy_sent++; }
+		if (!ar_phy_control_enqueue(&phy_control, AR_PHY_PWR_ANNOUNCE, 5, bytes, 4, &phy_ops, NULL)) { ap_pwr_announce = 0; ap_info.phy_sent++; }
 	}
 	/* The host's channel its SET 6 could not send (block busy): the same. */
 	if (ap_chan_host_pending && ap_link.state == AR_AP_CONNECTED && !ap_chan_hop &&
