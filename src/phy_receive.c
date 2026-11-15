@@ -25,7 +25,10 @@ int ar_phy_receive_process(struct ar_phy_control *control,
 	if ((packet[0] ^ check) & (control->mode == 3 ? 15 : 255)) { result = -74; goto done; }
 	static const uint8_t lengths[10] = {255,1,4,2,3,3,2,4,4,0};
 	unsigned command = packet[1] & 15, length = (packet[2] >> 1) & 7;
-	if (command > 9 || (lengths[command] != 255 && length != lengths[command]) ||
+	/* Command 9 carries Open8030's own TX power announcement (4 bytes,
+	 * ar_pwr_auto.h) besides stock's empty one. */
+	if (command > 9 || (lengths[command] != 255 && length != lengths[command] &&
+		!(command == 9 && length == 4)) ||
 		(command == 8 && (packet[6] & 12))) { result = -22; goto done; }
 	memcpy(control->rx,packet,7);
 	if (control->role == 1) {

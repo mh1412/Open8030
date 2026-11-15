@@ -33,7 +33,9 @@ static void field(uint32_t address, uint32_t value, void *context)
 }
 static void dispatch(unsigned command, uint8_t *data, size_t length, void *context)
 {
-	assert(context == &control && depth == 1 && command == 4 && data == control.rx+3 && length == 3); calls++;
+	/* Command 4 (3 bytes) in the stock cases; command 9 empty or 4 bytes. */
+	assert(context == &control && depth == 1 && data == control.rx+3 &&
+	       ((command == 4 && length == 3) || (command == 9 && (length == 0 || length == 4)))); calls++;
 }
 static void stop(void *context) { assert(context == &control && depth == 1); timer_active = 0; stops++; }
 static void start(uint32_t ms, void *context)
@@ -89,6 +91,18 @@ int main(void)
 	memcpy(saved,control.rx,7); packet[1] = 0x18; packet[2] = 8; packet[6] = 12; seal();
 	assert(process() == -22 && !memcmp(saved,control.rx,7));
 	read_status = -6; assert(process() == -6 && !memcmp(saved,control.rx,7));
+	/* Command 9: stock's empty one, and Open8030's 4-byte TX power
+	 * announcement (ar_pwr_auto.h), both dispatched; any other length is not. */
+	read_status = 0; control.callbacks |= 1u << 9;   /* rf_device's PHY_CALLBACKS */
+	{
+		const unsigned before = calls;
+		memset(packet,0,7); packet[1] = 0x19; packet[2] = 0; seal();
+		assert(!process() && calls == before + 1);
+		memset(packet,0,7); packet[1] = 0x19; packet[2] = 4 << 1; packet[3] = 0xad; packet[4] = 1; seal();
+		assert(!process() && calls == before + 2 && control.rx[3] == 0xad);
+		memset(packet,0,7); packet[1] = 0x19; packet[2] = 2 << 1; seal();
+		assert(process() == -22 && calls == before + 2);
+	}
 	reset(); control.mode = 3; receiver.dev_flags = 0x1280;
 	packet[0] = 0xf0; packet[1] = 4; packet[2] = 6; seal();
 	assert(!process() && preparations == 1 && fields == 1 && receiver.dev_flags == 0x1200);

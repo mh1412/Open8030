@@ -186,9 +186,16 @@ void ar_pwr_auto_peer(struct ar_pwr_auto *ctx, uint8_t dbm);
 uint32_t ar_pwr_auto_word(uint8_t target_dbm, uint8_t direction, uint8_t slot);
 /* 0 and the fields for a sub-type 6 word, -22 otherwise. */
 int ar_pwr_auto_parse(uint32_t word, uint8_t *target_dbm, uint8_t *direction, uint8_t *slot);
-/* Ours (Open8030 at both ends; stock sends no such sub-type): an AP
- * announces the TX power it runs at, at link-up and at each change -
- * command 8 sub-type 13, [11:4] dBm, other bits 0. */
+/* Ours (Open8030 at both ends; stock sends no such command): an AP
+ * announces the TX power it runs at, at link-up and at each change - PHY
+ * command 9, its word sub-type 13, [11:4] dBm, other bits 0. A command of
+ * its own, not command 8: a 2026.10.beta4 ground takes every command 8 as
+ * the frame mode ((byte >> 4) & 7 without looking at the sub-type), and at
+ * 26 dBm switched alone to the short frame - the link dropped and re-formed
+ * at each announcement. Command 9 it counts as unsupported and leaves.
+ * A ground still takes the announcement on command 8 (an AP built in
+ * between sends it there). */
+#define AR_PHY_PWR_ANNOUNCE 9u
 #define AR_PWR_AUTO_ANNOUNCE 13
 uint32_t ar_pwr_auto_announce_word(uint8_t dbm);
 /* 0 and the power for an announcement word, -22 otherwise. */
