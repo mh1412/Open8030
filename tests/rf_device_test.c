@@ -33,11 +33,13 @@ static uint8_t event_data[32][4];
 static unsigned last_event_id = 255, channel_events, bandwidth_events;
 static uint8_t last_event[4], channel_event[4], bandwidth_event[4];
 static unsigned distance_events; static uint8_t distance_event[4];
+static unsigned power_events; static uint8_t power_event[4];
 static void receive_event(unsigned id, const uint8_t *data, size_t length, void *context)
 {
 	/* Link (0, 3 bytes) and MCS (1); Open8030 also publishes channel (2) and
 	 * bandwidth (12) changes, 4 bytes each. */
-	assert(context == event_data && (id < 2 || id == 2 || id == 12 || id == 15) && length == (id ? 4u : 3u));
+	assert(context == event_data && (id < 2 || id == 2 || id == 12 || id == 14 || id == 15) && length == (id ? 4u : 3u));
+	if (id == 14) { power_events++; memcpy(power_event, data, 4); return; }   /* TX power: ours (1) or the AP's (0) */
 	if (id == 15) { distance_events++; memcpy(distance_event, data, 4); return; }   /* the distance, pushed */
 	last_event_id = id; memset(last_event, 0, 4); memcpy(last_event, data, length);
 	if (id == 2) { channel_events++; memcpy(channel_event, data, 4); }
@@ -438,6 +440,20 @@ static void open8030_linked_tests(void)
 	uint8_t power_request[4] = {0x26, 0x21, 0, 0};
 	ap_command(8, 1, power_request, 4); frame_header(); frame_header();
 	assert((*reg(0x0a110a00) & 0xffff) == 0x0da3 && ((*reg(0x0a110b00) >> 18) & 7) == 2);
+	/* The AP's TX power announcement (command 9; command 8 sub-type 13 from
+	 * an AP built in between): the AP's power (event 14, byte 1 = 0 the
+	 * peer's), never a frame switch. 26 dBm is 0x1ad, whose (byte >> 4) & 7 a
+	 * ground taking command 8 as the frame mode alone read as mode 2. */
+	{
+		const uint8_t p26[4] = {0xad, 0x01, 0, 0}, p25[4] = {0x9d, 0x01, 0, 0};
+		const unsigned events = power_events;
+		ap_command(AR_PHY_PWR_ANNOUNCE, 1, p26, 4); frame_header(); frame_header();
+		assert((*reg(0x0a110a00) & 0xffff) == 0x0da3 && ((*reg(0x0a110b00) >> 18) & 7) == 2);
+		assert(power_events == events + 1 && power_event[1] == 0 && power_event[2] == 26);
+		ap_command(8, 1, p25, 4); frame_header(); frame_header();
+		assert((*reg(0x0a110a00) & 0xffff) == 0x0da3 && ((*reg(0x0a110b00) >> 18) & 7) == 2);
+		assert(power_events == events + 2 && power_event[1] == 0 && power_event[2] == 25 && power_event[3] == 26);
+	}
 
 	/* A frame change must not reset an RX producer whose DMA completion
 	 * has not arrived. The pending change applies after ownership retires. */
@@ -517,18 +533,6 @@ static void open8030_linked_tests(void)
 		assert(engine_resets == resets);
 		ticks = a + frame; irq(5);
 		assert(engine_resets > resets && ((*reg(0x0a1109e0) >> 8) & 7) == 2);
-	}
-	/* The AP's TX power announcement (command 9; command 8 sub-type 13 from
-	 * an AP built in between): never a frame mode. 26 dBm is 0x1ad, whose
-	 * (byte >> 4) & 7 a ground that took it as command 8's frame mode read
-	 * as mode 2. */
-	{
-		const uint32_t mode = ar_rf_frame_information()->frame_mode;
-		const uint8_t power[4] = {0xad, 0x01, 0, 0};
-		ap_command(AR_PHY_PWR_ANNOUNCE, 5, power, 4); irq(5); irq(5);
-		assert(ar_rf_frame_information()->frame_mode == mode);
-		ap_command(8, 5, power, 4); irq(5); irq(5);
-		assert(ar_rf_frame_information()->frame_mode == mode);
 	}
 	/* The AP's resend maps (command 11): 12 frames, two bits each, newest
 	 * first, placed on our frames (the newest: the frame that ended at our
@@ -1738,7 +1742,8 @@ int main(void)
 		assert(ar_rf_host_ap_time() - time_before <= 21);
 		clock[2] = 6; receive_sync(clock, 1); /* Correct check, wrong length. */
 		assert(ar_rf_host_ap_time() - time_before <= 21);
-		/* The original has no command9 callback, including shared expiry.
+		/* The original has no command9 callback, including shared expiry
+		 * (Open8030 takes command 9 only as its 4-byte power announcement).
 		 * A command0 wildcard length7 also safely replaces an armed cache. */
 		unsigned dispatched_before = ar_rf_traffic_information()->commands[9].dispatched;
 		uint8_t no_callback[7] = {0,0x29,0,0,0,0,0};

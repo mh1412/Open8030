@@ -62,6 +62,10 @@ static uint32_t receive_metadata;
 static struct { uint32_t length, user, metadata; } receive_queue[4];
 static uint64_t receive_started;
 static struct ar_phy_control phy_control;
+/* The PHY commands handed to sync_dispatch/phy_dispatch: stock's 1-6 and 8,
+ * and 9 for Open8030's TX power announcement (ar_pwr_auto.h). Without bit 9
+ * the announcement was checked, then dropped. */
+#define PHY_CALLBACKS (0x17eu | 1u << AR_PHY_PWR_ANNOUNCE)
 static uint32_t receive_milliseconds, receive_iterations;
 static unsigned receive_operation;
 static ar_rf_event_callback event_callback;
@@ -1486,6 +1490,9 @@ void ar_rf_power_events(void)
 static void sync_apply(void)
 {
 	const uint8_t *control = sync_info.last_control;
+	/* Stock's own command 9 (empty) has no handler, as in the original: only
+	 * Open8030's 4-byte announcement is taken (PHY_CALLBACKS). */
+	if ((control[1] & 15) == AR_PHY_PWR_ANNOUNCE && ((control[2] >> 1) & 7) != 4) { return; }
 	if (receive_operation >= 71) { traffic_info.commands[control[1] & 15].dispatched++; }
 	if (receive_operation >= 72 && (control[1] & 15) == 3) { sync_tx_mcs(control); return; }
 	if (receive_operation >= 72 && (control[1] & 15) == 5) { sync_bandwidth(control); return; }
@@ -1633,7 +1640,7 @@ static void sync_receive(const uint8_t control[7])
 	struct ar_phy_receive receive = {.slot=receiver.assigned_slot,.dev_state=receiver.dev_state};
 	memcpy(receive.mac,dev_config.local,4);
 	phy_control.role = 1; phy_control.mode = dev_config.mode;
-	phy_control.frame_us = receiver.search_frame_us; phy_control.callbacks = 0x17e;
+	phy_control.frame_us = receiver.search_frame_us; phy_control.callbacks = PHY_CALLBACKS;
 	if (ar_phy_receive_process(&phy_control,&receive,&sync_ops,(void *)control)) {
 		sync_info.rejected++; return;
 	}
@@ -2282,7 +2289,7 @@ static const struct ar_phy_control_ops phy_ops = {
 static void phy_configure(void)
 {
 	phy_control.role = 1; phy_control.mode = dev_config.mode;
-	phy_control.wake = mcs_sync_mmio; phy_control.callbacks = 0x17e;
+	phy_control.wake = mcs_sync_mmio; phy_control.callbacks = PHY_CALLBACKS;
 	phy_control.frame_us = receiver.search_frame_us;
 }
 static struct ar_dev_mcs *dev_mcs_context(void)
@@ -3489,7 +3496,7 @@ static void ap_configure_radio(uint64_t pll, uint32_t frequency)
 	/* PHY control as the AP sends it. "wake" pauses ranging (0xd30[23:16])
 	 * while a command is queued: ranging shares the header field, so without
 	 * it the block never goes on air (grounds see ranging bytes instead). */
-	phy_control.role = 0; phy_control.mode = 0; phy_control.wake = 1; phy_control.callbacks = 0x17e;
+	phy_control.role = 0; phy_control.mode = 0; phy_control.wake = 1; phy_control.callbacks = PHY_CALLBACKS;
 	field(0x8000201, 0);                 /* the AP transmits from the start */
 	ap_tx_next = 0; ap_mac_sequence = 0;
 	memset(&ap_info, 0, sizeof ap_info); ap_info.version = 1;
@@ -4951,7 +4958,7 @@ void ar_rf_poll(void)
 				 * one the search was configured with: command 7's lead on
 				 * the AP time was off by up to a millisecond after a switch,
 				 * and the host's AP-clock figures with it. */
-				phy_control.callbacks = 0x17e; phy_control.frame_us = ap_frame_us;
+				phy_control.callbacks = PHY_CALLBACKS; phy_control.frame_us = ap_frame_us;
 				/* The frame stamp (when the channel is free): the AP's time at
 				 * the IRQ 5 before this block's header. */
 				phy_control.stamp_us = ar_frame_stamp_value(&fstamp); phy_control.stamp_period_ms = 100;
