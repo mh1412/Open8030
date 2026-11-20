@@ -64,6 +64,14 @@ static uint64_t receive_started;
 static struct ar_phy_control phy_control;
 static uint32_t receive_milliseconds, receive_iterations;
 static unsigned receive_operation;
+static unsigned listener_capture, listener_follow;
+static struct {
+    uint64_t due;
+    unsigned command, value, hops, widths, rejected;
+} listener_change;
+static void listener_control(const uint8_t control[7]);
+static void listener_poll(void);
+
 static ar_rf_event_callback event_callback;
 static void *event_context;
 void ar_rf_set_event_callback(ar_rf_event_callback callback, void *context)
@@ -968,6 +976,63 @@ static int retune_channel(unsigned index, unsigned slot, unsigned direction)
 	const uint8_t data[] = {(uint8_t)slot, (uint8_t)direction, (uint8_t)index, (uint8_t)previous};
 	publish_event(2, data, sizeof data);
 	return 0;
+}
+/* Spectators accept only the AP's receive-side channel/width controls.
+ * Never call sync_receive: that path also owns admission and transmit state. */
+static void listener_control(const uint8_t control[7])
+{
+    unsigned cmd=control[1]&15, life=(control[1]>>4)|((control[2]&1)<<4);
+    if (!listener_follow || (cmd!=4 && cmd!=5)) { return; }
+    if (control[0]!=ar_phy_control_checksum(control) || ((control[2]>>1)&7)!=3 || !life) {
+        listener_change.rejected++; return;
+    }
+    unsigned value;
+    if (cmd==4) {
+        value=control[4]|(unsigned)control[5]<<8;
+        if (!(control[3]&0x20) || (control[3]&0x8f) || value>=receiver.channel_count) {
+            listener_change.rejected++; return;
+        }
+        if (value==receiver.channel_index) { return; }
+    } else {
+        value=control[4]>>5;
+        if (control[3] || (control[4]&31)!=8 || value<2 || value>5) {
+            listener_change.rejected++; return;
+        }
+        if (value==bw_code) { return; }
+    }
+    listener_change.command=cmd; listener_change.value=value;
+    listener_change.due=timer_ticks()+(life==31?0:(uint64_t)(life-1)*receiver.search_frame_us*40);
+}
+static void listener_poll(void)
+{
+    if (!listener_follow || !listener_change.command || timer_ticks()<listener_change.due || receive_pending) { return; }
+    /* Flush/rearm only with no DMA in flight. hold/release_engines preserve
+     * TX hold bit 2; no transmit descriptor, power or uplink PLL is touched. */
+    if (hold_engines()) { stop_receive(); return; }
+    if (listener_change.command==4) {
+        if (!retune_user(listener_change.value,8,1)) { listener_change.hops++; }
+    } else {
+        unsigned code=listener_change.value;
+        field(0x9e00803,code);
+        update(BB+0xbac,0xffffc0c0,0);
+        update(BB+0xbd4,0x0003ff00,code==5?0x0003ff00:0);
+        field(0x9701010,code==5?0x09c4:0x1250);
+        bw_code=code; listener_change.widths++;
+        receiver.search_frame_us=dev_frame_microseconds();
+    }
+    field(0x8000201,1);
+    release_engines();
+    listener_change.command=0;
+}
+int ar_rf_listener_state(uint32_t output[8])
+{
+    if (!output) { return -22; }
+    output[0]=listener_follow && information.phase==AR_RF_RECEIVING;
+    output[1]=receiver.frequency_khz; output[2]=bw_code;
+    output[3]=listener_change.hops; output[4]=listener_change.widths;
+    output[5]=listener_change.rejected; output[6]=listener_change.command;
+    output[7]=receiver.channel_count;
+    return 0;
 }
 /* Received command 4 has independent direction flags even in mode 0:
  * 0x40 moves our slot TX, 0x10 broadcast TX, 0x20 broadcast RX. The 0x80
@@ -2799,6 +2864,21 @@ static void receive_complete(void)
 #endif
 		receiver.last_mac_descriptors = frame.descriptor_count;
 		receiver.last_outband_length = frame.outband_length;
+		if (listener_capture) {
+			/* Explicit bench capture of video only. No control callbacks or
+			 * admission: the caller supplied a fixed, trusted RF context.
+			 * The short PHY identity is not authentication. */
+			if (payload_callback && (receive_user == 0 || receive_user == 8)) {
+				for (unsigned i = 0; i < frame.descriptor_count; i++) {
+					struct ar_mac_payload payload;
+					if (!ar_mac_payload_at(&frame, i, &payload) && payload.port == 4) {
+						payload_callback(0, 4, payload.data, payload.length, payload_context);
+					}
+				}
+			}
+			receive_head = (receive_head + 1) & 3; receive_pending--;
+			return;
+		}
 		dev_observe_payloads(&frame);
 		if (receive_operation >= 60 && frame.outband_length == 6) {
 			dev_observe_compact(&frame);
@@ -3982,6 +4062,55 @@ int ar_rf_monitor(uint32_t frequency, uint32_t milliseconds, uint8_t identity_ha
 int ar_rf_monitor_plan(uint32_t frequency, uint32_t milliseconds, uint8_t identity_hash,
 	unsigned operation, const uint8_t *channels, size_t length)
 {
+	/* Operations 77/78 are bounded/continuous fixed-channel listeners. Keep the
+	 * underlying operation below the admission/PHY-command/TX thresholds;
+	 * merely inventing a connected DEV state would enable acknowledgements.
+	 * LST1: bandwidth, selector, interleave, buffer-mode; RX duration counts.
+	 * No automatic session tracking; only receive-only video delivery. */
+	if (operation == 77 || operation == 78) {
+		if (!channels || length != 12 || (memcmp(channels, "LST1", 4) && memcmp(channels, "LST2", 4)) ||
+		    channels[4] > 5 || channels[5] < 4 || channels[5] > 5 ||
+		    channels[6] < 5 || channels[6] > 6 || channels[7] > 1 ||
+		    !le32(channels + 8) || le32(channels + 8) > 65535 ||
+		    (operation == 77 ? !milliseconds || milliseconds > 10000 : milliseconds != 0)) { return -22; }
+        unsigned follow=!memcmp(channels,"LST2",4), initial=0;
+        if (follow) {
+            if (!host_config.valid || host_config.length<AR_RF_DEV4_PREFIX+4 ||
+                memcmp(host_config.channels,"DEV4",4) || channels[4]<2) { return -95; }
+            unsigned count=(host_config.length-AR_RF_DEV4_PREFIX)/4;
+            while (initial<count && le32(host_config.channels+AR_RF_DEV4_PREFIX+initial*4)!=frequency) { initial++; }
+            if (initial==count) { return -22; }
+        }
+		/* This diagnostic is DEV-only; do not reuse an AP's saved context. */
+		if (ap_role) { return -95; }
+		uint8_t channel[4];
+		for (unsigned i = 0; i < 4; i++) { channel[i] = frequency >> (8 * i); }
+		int result = configure_monitor(frequency, milliseconds, identity_hash,
+			53, channel, sizeof channel, operation == 78 ? 2 : 1, NULL);
+		if (result) { return result; }
+		host_prepared = 0; listener_capture = 1;
+        listener_follow=follow;
+        memset(&listener_change,0,sizeof listener_change);
+        if (follow) {
+            receiver.channel_count=(host_config.length-AR_RF_DEV4_PREFIX)/4;
+            for (unsigned i=0;i<receiver.channel_count;i++) {
+                receiver.channels[i].frequency_khz=le32(host_config.channels+AR_RF_DEV4_PREFIX+i*4);
+                receiver.channels[i].visits=0;
+            }
+            receiver.channel_index=initial; receiver.channels[initial].visits=1;
+        }
+        bw_code=channels[4];
+		field(0xde00008, identity_hash); field(0xdf00008, identity_hash);
+		field(0x9e00803, channels[4]); field(0x9e00003, channels[5]);
+		field(0x9e00d03, channels[6]); field(0x9701010, le32(channels + 8));
+		field(0xbf00002, channels[7]); field(0xd081001, 0);
+        receiver.search_frame_us=dev_frame_microseconds();
+		/* Search retuning clears the buffer map. Observe this fixed context
+		 * for the entire bounded trial, including when every payload fails. */
+		receiver.search_suspended = 1;
+		field(0x8000201, 1);
+		return start_prepared_receive();
+	}
 	return configure_monitor(frequency, milliseconds, identity_hash, operation, channels, length, 0, NULL);
 }
 
@@ -4369,7 +4498,8 @@ static int configure_monitor(uint32_t frequency, uint32_t milliseconds, uint8_t 
 			}
 		}
 	} else if (length) { return failure(-22); }
-	commands_ready = 0;
+	commands_ready = 0; listener_capture = listener_follow = 0;
+    memset(&listener_change,0,sizeof listener_change);
 	memset(&scan_info,0,sizeof scan_info); scan_info.version = 2; scan_info.count = scan_count;
 	memset(scan_history,0,sizeof scan_history);
 	/* Collect base-channel measurements. Group policy and the original initial
@@ -5311,7 +5441,8 @@ void ar_rf_poll(void)
 								if (normal_search && !search_candidate_seen && (user == 8 || user == 9)) {
 									search_candidate_seen = 1; search_candidate_started = read32(TIMER);
 								}
-								if (receive_operation >= 69 && (user == 8 || user == 9)) { sync_receive(control); }
+								if (listener_follow && user == 8) { listener_control(control); }
+                                else if (receive_operation >= 69 && (user == 8 || user == 9)) { sync_receive(control); }
 								if (ap_role && user == 0) { ap_phy_received(control); }
 							}
 							else {
@@ -5429,6 +5560,7 @@ void ar_rf_poll(void)
 	uint64_t elapsed = elapsed_ticks();
 	unsigned expired = receive_milliseconds && (elapsed >= (uint64_t)receive_milliseconds * 40000 || receive_iterations >= 1000000);
 	if (receive_operation >= 69 && !expired) { sync_poll((uint32_t)(elapsed / 40000)); }
+    if (listener_follow && !expired) { listener_poll(); }
 	/* An AP never searches: the retune below holds and releases both engines
 	 * and clears 0xbf0's buffer map, which leaves the AP's receive path at a
 	 * random phase and its broadcast HARQ unusable. */
@@ -5563,7 +5695,7 @@ static void stop_receive(void)
 
 int ar_rf_stop_host(void)
 {
-	if (receive_operation != 76 ||
+	if ((receive_operation != 76 && !listener_capture) ||
 	    (information.phase != AR_RF_RECEIVING && information.phase != AR_RF_PSRAM)) { return -11; }
 	if (information.phase == AR_RF_RECEIVING) {
 		/* Stop submissions, then drain an outstanding DMA before resetting
@@ -5648,6 +5780,18 @@ int ar_rf_host_control(unsigned operation, size_t payload_length)
 {
 	if (payload_length) { return -22; }
 	if (operation > 3) { return -95; }
+	/* A live listener can be stopped by its host owner, but never started
+	 * through the normal association path. */
+	if (listener_capture && receive_operation == 53 && operation == 1) { return ar_rf_stop_host(); }
+	/* An explicit INIT after a stopped listener restores the saved pilot
+	 * configuration. START alone must never turn a listener into a transmitter. */
+	if (listener_capture && receive_operation == 53 && operation == 2 &&
+	    information.phase != AR_RF_RECEIVING && host_config.valid) {
+		int result = prepare_saved_host();
+		if (result) { return result; }
+		host_initialized = 1; host_start_required = 1; lifecycle.initializations++;
+		return 0;
+	}
 	if (!host_config.valid || receive_operation != 76) { return -7; }
 	if (information.error) { return (int32_t)information.error; }
 	if (operation == 0) {

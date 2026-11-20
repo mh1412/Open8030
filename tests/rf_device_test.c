@@ -1121,6 +1121,59 @@ int main(void)
 	assert(ar_rf_monitor_plan(5770000, 10001, 0xcb, 53, channels, 8) == -22 && writes == before);
 	assert(ar_rf_monitor_plan(5770000, 1501, 0xcb, 52, channels, 8) == -22 && writes == before);
 	assert(ar_rf_monitor_plan(5770000, 0, 0xcb, 53, channels, 8) == -22 && writes == before);
+	/* Listener has no admission, even with a valid header. Its explicit
+	 * buffer context survives a search-dwell interval and stops bounded. */
+	uint8_t listen[12] = {'L','S','T','1',4,5,6,1,0x8a,0x20,0,0};
+	assert(ar_rf_monitor_plan(5770000, 100, 0xcb, 77, listen, 11) == -22 && writes == before);
+	assert(ar_rf_monitor_plan(5770000, 10001, 0xcb, 77, listen, 12) == -22 && writes == before);
+	listen[7] = 2;
+	assert(ar_rf_monitor_plan(5770000, 100, 0xcb, 77, listen, 12) == -22 && writes == before);
+	listen[7] = 1;
+	assert(ar_rf_monitor_plan(5770000, 100, 0xcb, 77, listen, 12) == 0);
+	assert((*reg(0x0a110800) & 7) == 4);
+	assert((*reg(0x0a110de0) & 255) == 0xcb && (*reg(0x0a110df0) & 255) == 0xcb);
+	assert((*reg(0x0a1109e0) & 0xe707) == 0xc405);
+	assert((*reg(0x0a110970) >> 16) == 0x208a);
+	assert((*reg(0x0a110bf0) & 3) == 1);
+	ar_rf_set_payload_callback(receive_payload, forwarded);
+	uint8_t listen_data[] = {1,2,3,4}, listen_control[6] = {0};
+	struct ar_mac_payload listen_part = {.port=4, .data=listen_data, .length=sizeof listen_data};
+	size_t listen_size;
+	assert(ar_mac_encode(valid_packet, sizeof valid_packet, 1, 0, listen_control, 6,
+		&listen_part, 1, &listen_size) == 0);
+	*reg(0x0a110f90) = listen_size; *reg(0x0a110f88) = 1u << 8;
+	forwarded_count = 0; inject_valid = inject_receive = 1; injected = 0;
+	ar_rf_poll(); ar_rf_poll();
+	assert(forwarded_count == 1 && forwarded_port == 4 && forwarded_length == 4);
+	assert(!memcmp(forwarded, listen_data, 4));
+	listen_part.port = 2;
+	assert(ar_mac_encode(valid_packet, sizeof valid_packet, 2, 0, listen_control, 6,
+		&listen_part, 1, &listen_size) == 0);
+	*reg(0x0a110f90) = listen_size; injected = 0; ar_rf_poll(); ar_rf_poll();
+	assert(forwarded_count == 1); /* No control/telemetry forwarding. */
+	valid_packet[2] ^= 1; injected = 0; ar_rf_poll(); ar_rf_poll();
+	assert(forwarded_count == 1); /* Invalid MAC checksum cannot reach a socket. */
+	inject_valid = inject_receive = 0; ar_rf_set_payload_callback(NULL, NULL);
+	ticks += 30 * 40000; inject_header = 1; ar_rf_poll();
+	assert(ar_rf_receive_information()->search_restarts == 0);
+	assert(ar_rf_receive_information()->dev_state == 0);
+	assert(ar_rf_receive_information()->sync_ack_submitted == 0);
+	assert(ar_rf_receive_information()->tx_packets == 0);
+	assert((*reg(0x0a110bf0) & 3) == 1 && (*reg(0x0a110800) & 4));
+	ticks += 100 * 40000; ar_rf_poll();
+	assert(ar_rf_information()->phase == AR_RF_PSRAM);
+	assert(*reg(0x0a110800) & 4);
+	before = writes;
+	assert(ar_rf_monitor_plan(5770000, 100, 0xcb, 78, listen, 12) == -22 && writes == before);
+	assert(ar_rf_monitor_plan(5770000, 0, 0xcb, 78, listen, 12) == 0);
+	ticks += 20000 * UINT64_C(40000); ar_rf_poll();
+	assert(ar_rf_information()->phase == AR_RF_RECEIVING);
+	assert(ar_rf_receive_information()->search_restarts == 0);
+	assert(ar_rf_host_control(0, 0) == -7); /* No normal start/association. */
+	assert(*reg(0x0a110800) & 4);
+	assert(ar_rf_host_control(1, 0) == 0);
+	assert(ar_rf_information()->phase == AR_RF_PSRAM);
+	assert(*reg(0x0a110800) & 4);
 	/* Longer configured-profile search crosses timer wrap and must survive
 	 * the historical 1.5-second boundary. Accepted stock cache bytes from
 	 * trial 92 pass the same check without synthesizing a received packet. */
@@ -1949,6 +2002,52 @@ int main(void)
 	} else { assert(!event_count); }
 	}
 	ar_rf_set_event_callback(NULL, NULL);
+    /* Following uses the saved catalog and only changes RX. Unrelated PHY
+     * commands cannot enroll the spectator or touch its transmit identity. */
+    uint8_t follow_plan[AR_RF_DEV4_PREFIX+8];
+    memcpy(follow_plan,mcs_plan,sizeof mcs_plan);
+    uint32_t next_frequency=5839000;
+    memcpy(follow_plan+sizeof mcs_plan,&next_frequency,4);
+    assert(!ar_rf_prepare_host_continuous(5770000,4,follow_plan,sizeof follow_plan));
+    uint8_t follow[12]={'L','S','T','2',5,4,5,1,0xc4,9,0,0};
+    assert(!ar_rf_monitor_plan(5770000,0,4,78,follow,sizeof follow));
+    uint32_t listener[8]; assert(!ar_rf_listener_state(listener) && listener[0] && listener[7]==2);
+    uint32_t tx_word=*reg(0x0a110b00), tx_identity=*reg(0x0a110b60);
+    uint8_t hop[7]={0,0x24,6,0x70,1,0,0};
+    receive_sync(hop,1);
+    ar_rf_listener_state(listener); assert(listener[6]==4 && listener[1]==5770000);
+    ticks+=20*40000; ar_rf_poll();
+    ar_rf_listener_state(listener); assert(listener[1]==5839000 && listener[3]==1);
+    receive_sync(hop,1); ticks+=20*40000; ar_rf_poll();
+    ar_rf_listener_state(listener); assert(listener[3]==1); /* repeat is idempotent */
+    uint8_t width[7]={0,0x15,6,0,8|(4<<5),0,0};
+    receive_sync(width,1); ar_rf_poll(); ar_rf_listener_state(listener);
+    assert(listener[2]==4 && listener[4]==1 && (*reg(0x0a110970)>>16)==0x1250);
+    width[4]=8|(5<<5); receive_sync(width,1); ar_rf_poll(); ar_rf_listener_state(listener);
+    assert(listener[2]==5 && listener[4]==2 && (*reg(0x0a110970)>>16)==0x09c4);
+    hop[4]=2; receive_sync(hop,1); ar_rf_listener_state(listener); assert(listener[5]==1);
+    uint8_t forbidden[7]={0,0xf6,4,0x18,0x55,0,0}; receive_sync(forbidden,1);
+    assert(*reg(0x0a110b00)==tx_word && *reg(0x0a110b60)==tx_identity && (*reg(0x0a110800)&4));
+    assert(!ar_rf_receive_information()->dev_state && !ar_rf_receive_information()->sync_ack_submitted);
+    assert(!ar_rf_receive_information()->tx_packets && !ar_rf_receive_information()->tx_preencode);
+    assert(!ar_rf_stop_host());
+	/* Pilot -> listener -> pilot requires an explicit stopped INIT. Normal
+	 * START/INIT while listening must not admit or transmit. */
+	assert(ar_rf_prepare_host_continuous(5770000, 4, mcs_plan, sizeof mcs_plan) == 0);
+	assert(ar_rf_host_control(0, 0) == 0);
+	assert(ar_rf_host_control(1, 0) == 0);
+	assert(ar_rf_host_control(3, 0) == 0);
+	assert(ar_rf_monitor_plan(5839000, 0, 0xf6, 78, listen, sizeof listen) == 0);
+	assert(ar_rf_host_control(2, 0) == -7);
+	assert(ar_rf_host_control(0, 0) == -7);
+	assert(*reg(0x0a110800) & 4);
+	assert(ar_rf_host_control(1, 0) == 0);
+	assert(ar_rf_host_control(0, 0) == -7);
+	assert(ar_rf_host_control(2, 0) == 0);
+	assert(ar_rf_information()->phase == AR_RF_PSRAM);
+	assert(ar_rf_host_control(0, 0) == 0);
+	assert(ar_rf_information()->phase == AR_RF_RECEIVING);
+	assert(ar_rf_host_control(1, 0) == 0);
 	/* EOP measurement layout, selector restoration, user9 alias, and the
 	 * duplicate guard reset by each FCH. These are synthetic register inputs. */
 	inject_receive = 0; inject_header = 0;

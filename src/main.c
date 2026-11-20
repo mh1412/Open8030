@@ -174,6 +174,27 @@ static void receive(const struct ar_frame *frame, void *context)
 		size_t size = ar_encode(reply, sizeof reply, &response);
 		(void)bus->send(reply, size); return;
 	}
+    if (frame->reqid == AR_REQ_SPECTATOR_STATE) {
+        uint32_t state[8]; ar_rf_listener_state(state);
+        struct ar_frame response={.reqid=frame->reqid,.msgid=frame->msgid,
+            .status=(frame->status || frame->length)?AR_STATUS_INVALID:0,
+            .payload=(const uint8_t *)state,.length=sizeof state};
+        size_t size=ar_encode(reply,sizeof reply,&response);
+        (void)bus->send(reply,size); return;
+    }
+	if (frame->reqid == AR_REQ_SPECTATOR_CAPS) {
+		/* LST1 envelope, API revision 2 (LST2 following); initial-width bitmap (40 MHz).
+		 * Read-only even while a normal pilot link is running. */
+		uint8_t caps[28] = {'L','S','T','1',2,0,0,0,0x20,0,0,0};
+		const struct ar_rf_rx_info *rx = ar_rf_receive_information();
+		const uint32_t values[] = {rx->dev_state,rx->tx_packets,rx->tx_preencode,rx->sync_ack_submitted};
+		for (unsigned i=0;i<4;i++) for (unsigned j=0;j<4;j++) caps[12+i*4+j]=values[i]>>(j*8);
+		struct ar_frame response = {.reqid=frame->reqid, .msgid=frame->msgid,
+			.status=(frame->status || frame->length) ? AR_STATUS_INVALID : 0,
+			.payload=caps, .length=sizeof caps};
+		size_t size = ar_encode(reply,sizeof reply,&response);
+		(void)bus->send(reply,size); return;
+	}
 	if (diagnostic_reqid == AR_REQ_RF_AP_TRACE && !frame->status && frame->length == 1) {
 		/* One byte: let the trace run on, never freezing again (1), or
 		 * freezing only when the AP stops transmitting (2). */

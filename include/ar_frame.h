@@ -58,6 +58,7 @@
 #define AR_REQ_RF_AP_RESET UINT32_C(0x0c5a0034)
 #define AR_REQ_RF_FRAME_INFO UINT32_C(0x0c5a0035)
 #define AR_REQ_RF_MCS_CEILING UINT32_C(0x0c5a0036)
+#define AR_REQ_SPECTATOR_CAPS UINT32_C(0x0c5a0037)
 /* Project-only read diagnostics through the original Linux daemon. Its
  * 0x4030d0 dispatcher consumes group 0x0c locally; group 0x01 is forwarded.
  * These aliases are not vendor commands. Never alias configuration/start. */
@@ -110,3 +111,5 @@ void ar_dispatch(const struct ar_frame *request, uint8_t *reply, size_t *length)
 void ar_rx_diagnostic_read(const struct ar_frame *request, const uint8_t *record,
 			  size_t size, struct ar_frame *response);
 #endif
+
+#define AR_REQ_SPECTATOR_STATE UINT32_C(0x0c5a0038)

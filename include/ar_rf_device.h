@@ -496,3 +496,5 @@ void ar_rf_set_hop_config(const struct ar_hop_config *hop);
  * and widens above. A zero max keeps 5 to 20 MHz. */
 void ar_rf_set_bandwidth_policy(unsigned automatic, unsigned min, unsigned max, unsigned narrow_mcs, unsigned widen_mcs);
 #endif
+
+int ar_rf_listener_state(uint32_t output[8]);
